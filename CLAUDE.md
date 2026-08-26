@@ -78,6 +78,12 @@ video o el archivo de la etapa anterior).
 - Logging: `setup_logging()` se llama una sola vez al arrancar. Las etapas solo
   hacen `logging.getLogger(__name__)`.
 - OpenCV vive unicamente en `gondola/video/`.
+- **Las librerias pesadas (ultralytics, torch, OpenCV) se importan DENTRO de
+  las funciones**, nunca arriba del archivo. Si no, nadie puede correr `pytest`
+  sin instalar 3 GB. Ver el docstring de `gondola/stages/detect.py`.
+- El render por defecto es `privacy`: fondo neutro, sin ningun pixel del video
+  original. El modo `debug` contiene imagenes de personas reales y NO se
+  comparte.
 - Serializar siempre con `Event.to_jsonl()`; leer con `Event.from_jsonl()`.
 
 ## Correr los tests
@@ -97,7 +103,9 @@ correr los tests sin descargar 3 GB de PyTorch. Lo pesado va en
   documentacion del contrato, tests unitarios.
 - **Fase 2 (hecha):** registro de etapas, CLI (`doctor`, `run`, `purge` y las
   cinco etapas como placeholders), lectura y escritura de .jsonl en streaming.
-- **Fase 3:** deteccion YOLO (Persona 2), lectura de video y render.
+- **Fase 3 (hecha):** lectura de video (`gondola/video/reader.py`), deteccion
+  YOLO (`gondola/stages/detect.py`), render en modo privacy/debug
+  (`gondola/video/render.py`) y clips sinteticos de prueba.
 - **Fase 4:** verificador de privacidad y de contrato.
 - **Fase 5:** evaluacion contra `groundtruth`, esquema SQL, frontend, README
   completo.
