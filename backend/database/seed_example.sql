@@ -95,18 +95,25 @@ VALUES
 -- Metricas agregadas
 --
 -- Gondola A: 2 personas distintas (track 1 y 2) en 7 filas de eventos.
---     people_count = 2        <-- COUNT(DISTINCT track_id), NO las 7 filas
---     interaction_count = 4   (2 APPROACH + 2 PICK_UP... y 1 PUT_BACK = 5)
---     pick_up = 2, put_back = 1
---     interaction_rate = interacciones / personas, acotada a 1.0
---     conversion_rate  = 2 personas tomaron algo / 2 personas = 1.0
+--     people_count      = 2     <-- COUNT(DISTINCT track_id), NO las 7 filas
+--     interaction_count = 5     2 APPROACH + 2 PICK_UP + 1 PUT_BACK
+--     pick_up_count     = 2
+--     put_back_count    = 1
+--     average_dwell     = 3.70  media de los 7 dwell_time_s de arriba
+--     interaction_rate  = 1.00  5 interacciones / 2 personas = 2.5, acotado a 1
+--     pick_up_rate      = 0.40  2 pick_up / 5 interacciones
+--     conversion_rate   = 1.00  las 2 personas tomaron algo
+--
+-- Las cifras del PRIMER video salen de los eventos de arriba: se reproducen
+-- con la consulta de referencia del final de schema.sql. Las del segundo
+-- video estan puestas a mano, no hay eventos que las respalden.
 -- ---------------------------------------------------------------------------
 INSERT INTO metrics (video_id, zone_id, window_start_s, window_end_s,
                      people_count, interaction_count, pick_up_count, put_back_count,
                      average_dwell_time_s, interaction_rate, pick_up_rate, conversion_rate)
 VALUES
   ('11111111-1111-1111-1111-111111111111', '22222222-0000-0000-0000-00000000000a',
-   0, 600, 2, 5, 2, 1, 4.35, 1.00, 0.40, 1.00),
+   0, 600, 2, 5, 2, 1, 3.70, 1.00, 0.40, 1.00),
 
   ('11111111-1111-1111-1111-111111111111', '22222222-0000-0000-0000-00000000000b',
    0, 600, 1, 1, 0, 0, 0.50, 1.00, 0.00, 0.00),
