@@ -106,8 +106,18 @@ correr los tests sin descargar 3 GB de PyTorch. Lo pesado va en
 - **Fase 3 (hecha):** lectura de video (`gondola/video/reader.py`), deteccion
   YOLO (`gondola/stages/detect.py`), render en modo privacy/debug
   (`gondola/video/render.py`) y clips sinteticos de prueba.
-- **Fase 4:** verificador de privacidad y de contrato.
-- **Fase 5:** evaluacion contra `groundtruth`, esquema SQL, frontend, README
-  completo.
+- **Fase 4 (hecha):** verificador de contrato y privacidad
+  (`gondola/verify/`) y evaluacion contra `groundtruth` (`gondola/evaluate/`).
+- **Fase 5 (hecha):** esquema SQL y datos de ejemplo (`backend/database/`),
+  documentacion (`docs/`), CI en GitHub Actions y README completo.
+
+Lo que sigue NO es una fase de arquitectura: son los modulos del equipo.
+`track` (Persona 3), `zones` (Persona 4), `interact` (Persona 5) y `metrics`
+(Persona 6) siguen siendo placeholders en la CLI. Cada uno crea su archivo en
+`gondola/stages/` y rellena SOLO sus campos del contrato.
+
+Sin video anotado a mano en `data/groundtruth/` no se puede afirmar nada sobre
+la exactitud del sistema. Ningun porcentaje de precision es publicable hasta
+entonces.
 
 No construir cosas de fases futuras.
