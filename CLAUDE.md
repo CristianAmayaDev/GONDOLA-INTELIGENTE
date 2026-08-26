@@ -50,8 +50,27 @@ Las etapas **enriquecen** el mismo evento; nunca inventan formatos:
 Cambiar la forma del evento implica subir `CONTRACT_VERSION`, actualizar
 `docs/data-contract.md` y avisar al equipo. Nunca por cuenta propia.
 
+## Ejecutar el proyecto
+
+Todo pasa por la CLI. Se ejecuta desde `ai-service/`, que es donde vive el
+paquete:
+
+```
+cd ai-service
+python -m gondola doctor     # diagnostico; empieza SIEMPRE por aqui
+python -m gondola run        # la cadena completa
+```
+
+Codigos de salida: 0 exito, 1 error de ejecucion, 2 falta un requisito (el
+video o el archivo de la etapa anterior).
+
 ## Convenciones
 
+- **Nombres de archivo: nunca a mano.** Se piden con
+  `pipeline.stage_paths(nombre, cfg)`. La tabla `STAGES` de
+  `gondola/pipeline.py` es la unica fuente de verdad de la cadena.
+- **Leer y escribir .jsonl:** `jsonl.read_events()` y `jsonl.write_events()`,
+  que van en streaming. Nunca `open()` a pelo ni cargar todo en una lista.
 - Configuracion: solo en `gondola/config.py`. Nadie mas llama a `os.getenv`.
   Toda variable nueva se documenta en `.env.example`.
 - Errores: usar la jerarquia de `gondola/errors.py`. El mensaje dice **que
@@ -76,8 +95,9 @@ correr los tests sin descargar 3 GB de PyTorch. Lo pesado va en
 
 - **Fase 1 (hecha):** estructura, contrato, configuracion, errores, logging,
   documentacion del contrato, tests unitarios.
-- **Fase 2:** CLI, registro de etapas, lectura de video.
-- **Fase 3:** deteccion YOLO (Persona 2) y render.
+- **Fase 2 (hecha):** registro de etapas, CLI (`doctor`, `run`, `purge` y las
+  cinco etapas como placeholders), lectura y escritura de .jsonl en streaming.
+- **Fase 3:** deteccion YOLO (Persona 2), lectura de video y render.
 - **Fase 4:** verificador de privacidad y de contrato.
 - **Fase 5:** evaluacion contra `groundtruth`, esquema SQL, frontend, README
   completo.
