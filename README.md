@@ -33,7 +33,11 @@ tocar la privacidad de nadie.
        |              |             |              |               |
        +--------- archivos .jsonl (un evento por línea) ------------+
                               |
-                          [ Backend ] --> PostgreSQL --> [ Dashboard ]
+                    [ Backend ] --> PostgreSQL      (Persona 7)
+                          |
+                       API REST
+                          v
+                    [ Dashboard ]                    (Persona 8)
 ```
 
 Cada etapa lee el archivo de la anterior, **rellena sus propios campos** del
@@ -50,11 +54,19 @@ El razonamiento completo está en [architecture.md](docs/architecture.md).
 
 | Capa | Herramientas |
 |---|---|
-| Detección | Python 3.12+, Ultralytics **YOLO11n**, OpenCV |
+| Detección (Personas 1–6) | Python 3.12+, Ultralytics **YOLO11n**, OpenCV |
 | Contrato de datos | Pydantic v2 (`extra="forbid"`) |
 | Formato de intercambio | JSONL (un evento por línea) |
+| Backend y API (Persona 7) | **Python** (FastAPI o equivalente) |
 | Base de datos | PostgreSQL |
+| Dashboard (Persona 8) | **Python**, lo más simple que sirva |
 | Tests | pytest |
+
+**Un solo lenguaje para las 8 personas: Python**, de la detección al dashboard.
+No usamos Java, Spring Boot, JPA, Maven, Gradle ni IntelliJ, y no hay nada de
+eso en el repositorio. Un único entorno que instalar, y cualquiera puede leer el
+código de cualquier otra. El razonamiento está en
+[architecture.md](docs/architecture.md).
 
 ---
 
@@ -74,8 +86,9 @@ PROYECTO GONDOLA INTELIGENTE/
 │   │   ├── verify/          ¿cumple el contrato y la privacidad?
 │   │   └── evaluate/        ¿acierta? (contra anotaciones humanas)
 │   └── tests/               unit/ (rápidos) e integration/ (con YOLO)
-├── backend/database/      schema.sql y datos de ejemplo (Persona 7)
-├── frontend/              Dashboard (Persona 8)
+├── backend/               Importador y API REST en Python (Persona 7)
+│   └── database/            schema.sql y datos de ejemplo
+├── frontend/              Dashboard en Python y recomendaciones (Persona 8)
 ├── data/                  videos, models, output, groundtruth
 ├── docs/                  Documentación
 └── scripts/               Utilidades
@@ -245,7 +258,8 @@ Detalle, incluida la relación con la Ley 1581 de 2012, en
 | Verificador y evaluación | hecho |
 | Base de datos, documentación y CI | hecho |
 | Seguimiento, zonas, interacción, métricas | pendiente — Personas 3–6 |
-| Backend y dashboard | pendiente — Personas 7–8 |
+| Importador y API REST en Python | pendiente — Persona 7 |
+| Dashboard, recomendaciones e integración final | pendiente — Persona 8 |
 | **Anotación de video para medir exactitud** | pendiente — **sin esto no hay cifras** |
 
 ### Lo que este sistema todavía NO puede afirmar

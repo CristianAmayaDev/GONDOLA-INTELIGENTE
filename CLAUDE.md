@@ -9,6 +9,26 @@ y planogramas.
 
 Proyecto universitario de 8 personas. La Persona 1 lidera la arquitectura.
 
+## Un solo lenguaje: todo el proyecto es Python
+
+Las tres capas son Python, incluidas las dos que todavia no existen:
+
+| Capa | Lenguaje | Quien |
+|---|---|---|
+| Pipeline (`ai-service/`) | Python 3.12+, YOLO11n, OpenCV, Pydantic v2 | Personas 1-6 |
+| Backend y API (`backend/`) | **Python** (FastAPI o equivalente) + PostgreSQL | Persona 7 |
+| Dashboard (`frontend/`) | **Python**, lo mas simple que sirva | Persona 8 |
+
+**No se usa Java, Spring Boot, JPA, Maven, Gradle ni IntelliJ.** No hay una sola
+linea de eso en el repositorio y no debe aparecer ninguna. Que `backend/` hoy
+solo contenga `.sql` no significa que el backend sea de otro lenguaje: significa
+que la Persona 7 aun no ha escrito el importador ni la API, y los escribira en
+Python.
+
+El criterio es un unico lenguaje para las 8 personas: un solo entorno que
+instalar, y cualquiera puede leer y arreglar el codigo de cualquier otra. Vale
+mas que la herramienta ideal en cada capa.
+
 ## Regla numero uno: el proyecto debe ser PEQUENO
 
 Quien lo escribe tiene que poder defenderlo ante un jurado. Codigo que no se

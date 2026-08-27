@@ -21,10 +21,12 @@
    [ metrics ] agrega los totales               -> video_001.metrics.json
        |
        v
-   [ Backend ] lee los archivos  ------------->  PostgreSQL
-                                                     |
-                                                     v
-                                                [ Dashboard ]
+   [ Backend ]  importa los archivos  ------->  PostgreSQL      Persona 7
+       |       y expone una API REST
+       |
+       |  API REST  (la única vía: el dashboard nunca consulta PostgreSQL)
+       v
+   [ Dashboard ]  + recomendaciones                              Persona 8
 ```
 
 Cada etapa lee el archivo de la anterior, **rellena sus propios campos** del
@@ -71,14 +73,53 @@ reconsiderarla.
 
 ## Las tres capas
 
-| Capa | Carpeta | Qué hace | Quién |
-|---|---|---|---|
-| **AI Service** | `ai-service/` | Del video a los `.jsonl`. Python, YOLO, OpenCV. | Personas 1–6 |
-| **Backend** | `backend/` | De los `.jsonl` a PostgreSQL. Expone la API. | Persona 7 |
-| **Frontend** | `frontend/` | Dashboard y recomendaciones. | Persona 8 |
+| Capa | Carpeta | Qué hace | Lenguaje | Quién |
+|---|---|---|---|---|
+| **AI Service** | `ai-service/` | Del video a los `.jsonl`. | Python 3.12+ (YOLO11n, OpenCV, Pydantic v2) | Personas 1–6 |
+| **Backend** | `backend/` | De los `.jsonl` a PostgreSQL. Expone la API REST. | **Python** (FastAPI o equivalente) + PostgreSQL | Persona 7 |
+| **Frontend** | `frontend/` | Dashboard y recomendaciones. | **Python**, lo más simple que sirva | Persona 8 |
 
 Las capas solo se comunican por **archivos** (AI → Backend) y por **API**
 (Backend → Frontend). Nadie importa código de otra capa.
+
+### Las tres capas son Python
+
+**No usamos Java, Spring Boot, JPA, Maven, Gradle ni IntelliJ.** No hay nada de
+eso en el repositorio y no hay que instalarlo.
+
+El criterio no es que Python sea mejor: es que **un solo lenguaje para las 8
+personas** vale más que la herramienta ideal en cada capa. Con un único entorno,
+quien escribe una etapa del pipeline puede leer el backend, y quien hace el
+dashboard puede depurar el importador. Con dos lenguajes tendríamos dos
+ecosistemas, dos formas de empaquetar y dos mitades del equipo que no se pueden
+ayudar entre sí.
+
+---
+
+## Personas 7 y 8: quién hace qué
+
+Las capas Backend y Frontend van a personas distintas a propósito: base de
+datos, API y dashboard en una sola persona es demasiada carga para una.
+
+**PERSONA 7 — datos y API** (`backend/`)
+
+- Levantar PostgreSQL y cargar el esquema (`backend/database/schema.sql`).
+- **Importador**: de los `.jsonl` del pipeline a las tablas. Idempotente:
+  correrlo dos veces sobre el mismo archivo no duplica filas.
+- **API REST en Python** (FastAPI o equivalente) que sirve las métricas.
+- **LEE:** los archivos del pipeline · **ESCRIBE:** PostgreSQL
+
+**PERSONA 8 — dashboard, recomendaciones e integración final** (`frontend/`)
+
+- **Dashboard** sobre la API de la Persona 7, en Python.
+- **Motor de recomendaciones** de *space management* y planograma.
+- **Optimización para ejecución local** (*edge*) y Docker.
+- **Integración final**, pruebas de extremo a extremo y demo.
+- **LEE:** la API de la Persona 7 · **ESCRIBE:** la interfaz y las recomendaciones
+
+Esta frontera es la misma regla de arriba aplicada al equipo: la Persona 8 no
+lee los `.jsonl` ni consulta PostgreSQL por su cuenta. Si el dashboard necesita
+un dato que la API no da, se pide un endpoint; no se salta la capa.
 
 ---
 

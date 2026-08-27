@@ -29,6 +29,24 @@ pip install -r requirements.txt         # ~3 GB, arrastra PyTorch
 
 ---
 
+## Un solo lenguaje: Python
+
+**Todo el proyecto es Python**, de la detección al dashboard.
+
+| Capa | Lenguaje y herramientas |
+|---|---|
+| Pipeline (Personas 1–6) | Python 3.12+, Ultralytics YOLO11n, OpenCV, Pydantic v2 |
+| Backend y API (Persona 7) | **Python** (FastAPI o equivalente) + PostgreSQL |
+| Dashboard (Persona 8) | **Python**, lo más simple que sirva |
+
+**No usamos Java, Spring Boot, JPA, Maven, Gradle ni IntelliJ.** No hace falta
+instalar nada de eso y no hay una sola línea de eso en el repositorio.
+
+El criterio es un único lenguaje para las 8 personas: un solo entorno que
+instalar, y cualquiera puede leer y arreglar el código de cualquier otra.
+
+---
+
 ## Las 8 personas
 
 | # | Rol | Comando | LEE | ESCRIBE | Estado |
@@ -39,8 +57,8 @@ pip install -r requirements.txt         # ~3 GB, arrastra PyTorch
 | **4** | Zonas y permanencia | `zones` | `<video>.track.jsonl` | `<video>.zones.jsonl` | ⬜ |
 | **5** | Interacción | `interact` | `<video>.zones.jsonl` | `<video>.interact.jsonl` | ⬜ |
 | **6** | Métricas | `metrics` | `<video>.interact.jsonl` | `<video>.metrics.json` | ⬜ |
-| **7** | Backend + BD | — | los `.jsonl` | PostgreSQL | ⬜ |
-| **8** | Dashboard | — | la API del backend | recomendaciones | ⬜ |
+| **7** | Datos y API (Python) | — | los `.jsonl` del pipeline | PostgreSQL + API REST | ⬜ |
+| **8** | Dashboard, recomendaciones e integración (Python) | — | la API de la Persona 7 | dashboard + recomendaciones | ⬜ |
 
 ### Qué campo del contrato rellena cada quien
 
@@ -53,6 +71,47 @@ pip install -r requirements.txt         # ~3 GB, arrastra PyTorch
 
 **Rellenas SOLO lo tuyo.** Los campos de las demás etapas se quedan como están.
 El verificador lo comprueba y falla si te sales de tu carril.
+
+### Cuidado: "metrics" son tres cosas distintas
+
+La palabra aparece en tres sitios y conviene no confundirlos:
+
+| Dónde | Qué es | De quién |
+|---|---|---|
+| `metrics.dwell_time` | un **CAMPO** del contrato | Persona 4 |
+| la etapa `metrics` | un **COMANDO** del pipeline | Persona 6 |
+| la tabla `metrics` | una **TABLA** de PostgreSQL | Persona 7 |
+
+**El campo guarda el tiempo de UNA persona en UNA zona. La etapa y la tabla
+guardan totales agregados de todo el video.** No se renombra ninguno: el campo
+está fijado por el contrato y la tabla por el esquema, y cambiarlos ahora
+rompería las dos cosas.
+
+### Personas 7 y 8, en detalle
+
+Las Personas 7 y 8 no escriben etapas del pipeline ni rellenan campos del
+contrato: **lo consumen**. El reparto va separado a propósito — base de datos,
+API y dashboard en una sola persona es demasiado para una.
+
+**PERSONA 7 — datos y API**
+
+- Levantar PostgreSQL y cargar el esquema (`backend/database/schema.sql`).
+- **Importador**: de los `.jsonl` del pipeline a las tablas. Idempotente:
+  correrlo dos veces sobre el mismo archivo no duplica filas.
+- **API REST en Python** (FastAPI o equivalente) que sirve las métricas.
+- **LEE:** los archivos del pipeline · **ESCRIBE:** PostgreSQL
+
+**PERSONA 8 — dashboard, recomendaciones e integración final**
+
+- **Dashboard** sobre la API de la Persona 7, en Python, lo más simple que sirva.
+- **Motor de recomendaciones** de *space management* y planograma.
+- **Optimización para ejecución local** (*edge*) y Docker.
+- **Integración final**, pruebas de extremo a extremo y demo.
+- **LEE:** la API de la Persona 7 · **ESCRIBE:** la interfaz y las recomendaciones
+
+La Persona 8 **no** lee los `.jsonl` ni consulta PostgreSQL directamente: todo
+pasa por la API. Si el dashboard necesita un dato que la API no da, se le pide
+un endpoint a la Persona 7; no se salta la capa.
 
 ---
 
@@ -69,7 +128,9 @@ El verificador lo comprueba y falla si te sales de tu carril.
 
 - **Persona 7** — carga `backend/database/seed_example.sql` y trabaja con datos
   ficticios que tienen la forma exacta de los reales.
-- **Persona 8** — igual: el dashboard se puede construir sobre esos datos.
+- **Persona 8** — arranca en cuanto la Persona 7 tenga la API en pie, aunque
+  todavía devuelva los datos ficticios del `seed_example.sql`. El dashboard se
+  construye **contra la API**, no leyendo los `.jsonl` ni la base de datos.
 - **Quien pueda** — anotar video para el ground truth (ver
   [evaluation.md](evaluation.md)). Es trabajo manual que no depende del código
   y sin él no podemos medir nada.
