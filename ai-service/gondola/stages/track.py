@@ -21,11 +21,20 @@ velocidad (px/s, estimada con las dos ultimas posiciones). En cada frame nuevo:
        distingue a dos personas que se cruzan: aunque sus cajas de este frame
        se solapen casi del todo, sus predicciones -que vienen de direcciones
        distintas- no.
-    2. Se EMPAREJA cada prediccion con las cajas del frame por IoU, de mayor a
-       menor (voraz). Si el mejor IoU de un par no llega a
-       IOU_MINIMO_PARA_EMPAREJAR, no se fuerza: es preferible abrir un track
-       nuevo a intercambiar dos identidades en silencio (un ID switch no da
-       ningun error, solo datos mal atribuidos).
+    2. Se EMPAREJA cada prediccion con las cajas del frame, de mayor a menor
+       puntaje (voraz). El puntaje NO es solo IoU: se multiplica por
+       `coherencia_de_movimiento`, que favorece al candidato que continua el
+       rumbo que el track ya traia y penaliza el que implicaria una reversa
+       de 180 grados en un solo frame. Hace falta, y no es un detalle: en un
+       cruce con direcciones opuestas, el IoU solo puede dar el MISMO valor a
+       las dos cajas del otro lado (un empate real, no redondeo), y sin mas
+       informacion el orden en que YOLO entrego las cajas termina decidiendo
+       por accidente cual identidad se queda con cual. La direccion sí las
+       distingue. Si el mejor puntaje de un par no llega a
+       IOU_MINIMO_PARA_EMPAREJAR (medido en IoU puro, la coherencia nunca
+       relaja esta puerta), no se fuerza: es preferible abrir un track nuevo
+       a intercambiar dos identidades en silencio (un ID switch no da ningun
+       error, solo datos mal atribuidos).
     3. Un track que no se empareja NO muere de inmediato: sigue "flotando"
        sobre su prediccion hasta MAX_AGE_S segundos sin ver nada. Esto es lo
        que le permite sobrevivir a una persona que YOLO dejo de ver un par de
@@ -96,6 +105,7 @@ from __future__ import annotations
 
 import colorsys
 import json
+import math
 import time
 from dataclasses import dataclass
 from itertools import groupby
@@ -118,9 +128,20 @@ darse por perdido. EN SEGUNDOS, no en frames ni en eventos: ver el docstring
 del modulo sobre por que (FRAME_STRIDE cambia cuantos eventos representan el
 mismo tiempo real)."""
 
+NIVEL_IOU_PARA_DESEMPATE = 0.1
+"""Ancho del escalon de IoU dentro del cual dos candidatos se consideran
+'igual de buenos' y se desempatan por coherencia de movimiento
+(ver `emparejar`). Una diferencia de IoU mayor que esto es una senal
+geometrica demasiado fuerte como para que la direccion la contradiga."""
+
 EVENTOS_ENTRE_AVISOS = 2000
 """Cada cuantos eventos se informa del progreso. Esta etapa es mucho mas
 rapida que YOLO, pero un video largo igual conviene que avise que sigue viva."""
+
+VELOCIDAD_MINIMA_PARA_COHERENCIA = 20.0
+"""Px/s por debajo de esto, un track no tiene un rumbo confiable que comparar
+(recien creado, o alguien casi quieto): la coherencia de movimiento queda
+neutra (1.0) en vez de penalizar una direccion que no significa nada."""
 
 
 @dataclass
@@ -207,28 +228,83 @@ def actualizar_track(track: Track, evento: Event) -> None:
     track.timestamp = evento.timestamp
 
 
+def coherencia_de_movimiento(track: Track, prediccion: BBox, evento: Event) -> float:
+    """Que tan bien encaja este candidato con el RUMBO que el track ya traia.
+
+    No compara contra la ultima posicion cruda, sino contra el RESIDUAL: hacia
+    donde queda el candidato respecto a lo que ya se predijo. Si ese residual
+    apunta en la misma direccion que la velocidad establecida, el candidato
+    continua el rumbo (cerca de 1.0). Si apunta en la direccion contraria,
+    implicaria que la persona invirtio su movimiento en un solo frame (cerca
+    de 0.0) -que es exactamente lo que pasa cuando dos identidades se cruzan
+    y el emparejamiento las intercambia.
+
+    Es neutro (1.0, no penaliza) cuando no hay rumbo confiable que comparar:
+    un track recien creado (velocidad (0,0)), uno casi quieto (por debajo de
+    VELOCIDAD_MINIMA_PARA_COHERENCIA), o un candidato que cae practicamente
+    encima de la prediccion (residual ~0, nada que indique una direccion).
+    """
+    vx, vy = track.velocity
+    magnitud_velocidad = math.hypot(vx, vy)
+    if magnitud_velocidad < VELOCIDAD_MINIMA_PARA_COHERENCIA:
+        return 1.0
+
+    cx_p, cy_p = centro(prediccion)
+    cx_e, cy_e = centro(evento.detection.bbox)
+    residual = (cx_e - cx_p, cy_e - cy_p)
+    magnitud_residual = math.hypot(*residual)
+    if magnitud_residual < 1.0:
+        return 1.0
+
+    coseno = (vx * residual[0] + vy * residual[1]) / (magnitud_velocidad * magnitud_residual)
+    return (1.0 + coseno) / 2.0
+
+
 def emparejar(
     tracks: dict[int, Track], eventos: list[Event]
 ) -> tuple[dict[int, Event], list[Event]]:
     """Empareja los tracks activos con las detecciones de UN mismo frame.
 
-    Voraz: se ordenan todos los pares (track, deteccion) por IoU descendente y
-    se van tomando mientras ninguno de los dos ya este usado. No es el optimo
-    matematico (eso seria el algoritmo Hungaro), pero con la poca gente que
-    hay a la vez frente a una gondola la diferencia es despreciable, y evita
-    sumar una dependencia (scipy) solo para esto.
+    El candidato tiene que solapar lo suficiente con la prediccion
+    (IOU_MINIMO_PARA_EMPAREJAR) para ser geometricamente plausible; ESO nunca
+    lo relaja la coherencia de movimiento. La coherencia SOLO desempata entre
+    candidatos cuyo IoU ya cae en el mismo escalon (NIVEL_IOU_PARA_DESEMPATE);
+    nunca hace perder a un IoU muchisimo mejor. Esto no es un detalle: se
+    intento primero multiplicar iou*coherencia directo, y en video real
+    (video_003.mp4) eso hizo que un IoU excelente (0.99, una persona
+    practicamente quieta) perdiera contra uno mediocre (0.32) solo porque la
+    caja de YOLO tembló un poco en la altura de un frame a otro -la direccion
+    de un residual minusculo es puro ruido, no una senal real de reversa, y
+    fragmento un track que no tenia nada de ambiguo. Por escalones, la
+    coherencia solo puede decidir entre candidatos que YA eran parecidos.
+
+    Dentro de un mismo escalon, dos personas que se cruzan en direcciones
+    opuestas pueden dar el MISMO IoU a las dos cajas del otro lado del cruce
+    -un empate real, no un error de redondeo- y el orden en que YOLO entrego
+    las cajas terminaria decidiendo, por accidente, cual identidad se queda
+    con cual. La direccion sí distingue: la opcion correcta continua el rumbo
+    de cada quien, la cruzada implica que alguien invirtio su movimiento de
+    un frame a otro.
+
+    Voraz: se ordenan todos los pares (track, deteccion) por (escalon,
+    coherencia), descendente, y se van tomando mientras ninguno de los dos ya
+    este usado. No es el optimo matematico (eso seria el algoritmo Hungaro),
+    pero con la poca gente que hay a la vez frente a una gondola la diferencia
+    es despreciable, y evita sumar una dependencia (scipy) solo para esto.
 
     Devuelve (emparejados: {track_id: evento}, sin_emparejar: detecciones que
     no encontraron track y necesitan uno nuevo).
     """
     timestamp = eventos[0].timestamp
-    candidatos: list[tuple[float, int, int]] = []
+    candidatos: list[tuple[tuple[float, float], int, int]] = []
     for track_id, track in tracks.items():
         prediccion = predecir_bbox(track, timestamp)
         for indice, evento in enumerate(eventos):
             valor = iou(prediccion, evento.detection.bbox)
             if valor >= IOU_MINIMO_PARA_EMPAREJAR:
-                candidatos.append((valor, track_id, indice))
+                escalon = round(valor / NIVEL_IOU_PARA_DESEMPATE)
+                coherencia = coherencia_de_movimiento(track, prediccion, evento)
+                candidatos.append(((escalon, coherencia), track_id, indice))
     candidatos.sort(key=lambda c: c[0], reverse=True)
 
     usados_tracks: set[int] = set()

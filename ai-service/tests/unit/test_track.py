@@ -22,6 +22,7 @@ from gondola.stages.track import (
     actualizar_track,
     asignar_track_ids,
     centro,
+    coherencia_de_movimiento,
     color_desde_id,
     contar_cruces_sospechosos,
     emparejar,
@@ -136,6 +137,90 @@ def test_emparejar_no_repite_ni_track_ni_deteccion():
     emparejados, sin_emparejar = emparejar(tracks, [e1, e2])
     assert set(id(e) for e in emparejados.values()) == {id(e1), id(e2)}
     assert sin_emparejar == []
+
+
+# --------------------------------------------------------------------------
+# coherencia_de_movimiento: el empate que el IoU solo no puede resolver
+# --------------------------------------------------------------------------
+
+def test_coherencia_favorece_continuar_el_rumbo():
+    track = Track(bbox=BBox(x=34, y=16, width=40, height=40), timestamp=0.04,
+                 velocity=(400.0, 100.0))
+    prediccion = predecir_bbox(track, 0.08)
+    continua = crear_evento(2, 0.08, x=54, y=21, w=40, h=40)  # sigue el rumbo
+    reversa = crear_evento(2, 0.08, x=46, y=19, w=40, h=40)   # implica dar la vuelta
+
+    assert coherencia_de_movimiento(track, prediccion, continua) == pytest.approx(1.0, abs=1e-3)
+    assert coherencia_de_movimiento(track, prediccion, reversa) == pytest.approx(0.0, abs=1e-3)
+
+
+def test_coherencia_es_neutra_sin_rumbo_establecido():
+    """Track recien creado (velocidad (0,0)): no hay direccion previa que
+    comparar, asi que no se penaliza nada."""
+    track = Track(bbox=BBox(x=0, y=0, width=40, height=40), timestamp=0.0)
+    prediccion = predecir_bbox(track, 0.04)
+    cualquiera = crear_evento(1, 0.04, x=200, y=200, w=40, h=40)
+    assert coherencia_de_movimiento(track, prediccion, cualquiera) == 1.0
+
+
+def test_coherencia_es_neutra_si_el_candidato_cae_sobre_la_prediccion():
+    track = Track(bbox=BBox(x=0, y=0, width=40, height=40), timestamp=0.0, velocity=(400.0, 0.0))
+    prediccion = predecir_bbox(track, 0.04)
+    cx, cy = centro(prediccion)
+    encima = crear_evento(1, 0.04, x=cx - 20, y=cy - 20, w=40, h=40)
+    assert coherencia_de_movimiento(track, prediccion, encima) == 1.0
+
+
+def test_sin_coherencia_el_empate_simetrico_depende_del_orden_de_llegada(monkeypatch):
+    """Expone el problema (no lo esquiva): forzando la logica VIEJA -coherencia
+    siempre neutra, emparejar solo por IoU-, el resultado de un cruce con
+    velocidades simetricas cambia segun el orden en que llegan las cajas del
+    frame. La mitad de las veces es un ID switch, por pura casualidad de cual
+    caja escribio YOLO primero. Este test pasa HOY (asi de real es el bug) y
+    seguiria pasando aunque se borrara la coherencia: es la prueba de que el
+    problema existia antes del arreglo."""
+    import gondola.stages.track as track_mod
+
+    monkeypatch.setattr(track_mod, "coherencia_de_movimiento", lambda *_a, **_k: 1.0)
+
+    track_a = Track(bbox=BBox(x=34, y=16, width=40, height=40), timestamp=0.04,
+                    velocity=(400.0, 100.0))
+    track_b = Track(bbox=BBox(x=66, y=24, width=40, height=40), timestamp=0.04,
+                    velocity=(-400.0, -100.0))
+    det_a_real = crear_evento(2, 0.08, x=54, y=21, w=40, h=40)  # continua el rumbo de A
+    det_b_real = crear_evento(2, 0.08, x=46, y=19, w=40, h=40)  # continua el rumbo de B
+
+    tracks = {1: track_a, 2: track_b}
+    en_un_orden, _ = track_mod.emparejar(tracks, [det_a_real, det_b_real])
+    en_el_otro, _ = track_mod.emparejar(tracks, [det_b_real, det_a_real])
+
+    assert en_un_orden[1] is det_a_real and en_un_orden[2] is det_b_real  # este orden acierta...
+    assert en_el_otro[1] is det_b_real and en_el_otro[2] is det_a_real    # ...el otro CAMBIA el resultado
+
+
+def test_dos_personas_con_velocidades_simetricas_el_iou_solo_empata():
+    """El mismo cruce del test anterior, pero con la logica ACTUAL (coherencia
+    incluida): las predicciones de A y B coinciden EXACTO -el empate de IoU es
+    real, no redondeo-, y aun asi el resultado ya NO depende del orden: la
+    direccion distingue lo que el IoU no puede."""
+    track_a = Track(bbox=BBox(x=34, y=16, width=40, height=40), timestamp=0.04,
+                    velocity=(400.0, 100.0))
+    track_b = Track(bbox=BBox(x=66, y=24, width=40, height=40), timestamp=0.04,
+                    velocity=(-400.0, -100.0))
+
+    pred_a = predecir_bbox(track_a, 0.08)
+    pred_b = predecir_bbox(track_b, 0.08)
+    assert pred_a == pred_b  # el empate de verdad: las dos predicciones son la MISMA caja
+
+    det_a_real = crear_evento(2, 0.08, x=54, y=21, w=40, h=40)  # continua el rumbo de A
+    det_b_real = crear_evento(2, 0.08, x=46, y=19, w=40, h=40)  # continua el rumbo de B
+    assert iou(pred_a, det_a_real.detection.bbox) == iou(pred_a, det_b_real.detection.bbox)
+
+    tracks = {1: track_a, 2: track_b}
+    for orden in ([det_a_real, det_b_real], [det_b_real, det_a_real]):
+        emparejados, _ = emparejar(tracks, orden)
+        assert emparejados[1] is det_a_real  # A se queda con SU continuacion...
+        assert emparejados[2] is det_b_real  # ...B con la suya, sin importar el orden
 
 
 # --------------------------------------------------------------------------
