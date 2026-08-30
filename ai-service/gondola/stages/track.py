@@ -21,24 +21,29 @@ velocidad (px/s, estimada con las dos ultimas posiciones). En cada frame nuevo:
        distingue a dos personas que se cruzan: aunque sus cajas de este frame
        se solapen casi del todo, sus predicciones -que vienen de direcciones
        distintas- no.
-    2. Se EMPAREJA cada prediccion con las cajas del frame, de mayor a menor
-       puntaje (voraz). El puntaje NO es solo IoU: se multiplica por
-       `coherencia_de_movimiento`, que favorece al candidato que continua el
-       rumbo que el track ya traia y penaliza el que implicaria una reversa
-       de 180 grados en un solo frame. Hace falta, y no es un detalle: en un
-       cruce con direcciones opuestas, el IoU solo puede dar el MISMO valor a
-       las dos cajas del otro lado (un empate real, no redondeo), y sin mas
+    2. Se EMPAREJA cada prediccion con las cajas del frame. El candidato
+       tiene que solapar por encima de IOU_MINIMO_PARA_EMPAREJAR para ser
+       geometricamente plausible. Entre candidatos cuyo IoU ya es parecido
+       (mismo escalon, NIVEL_IOU_PARA_DESEMPATE), se desempata por
+       `coherencia_de_movimiento`, que favorece al que continua el rumbo que
+       el track ya traia y penaliza al que implicaria una reversa de 180
+       grados en un solo frame. Hace falta, y no es un detalle: en un cruce
+       con direcciones opuestas, el IoU solo puede dar el MISMO valor a las
+       dos cajas del otro lado (un empate real, no redondeo), y sin mas
        informacion el orden en que YOLO entrego las cajas termina decidiendo
        por accidente cual identidad se queda con cual. La direccion sí las
-       distingue. Si el mejor puntaje de un par no llega a
-       IOU_MINIMO_PARA_EMPAREJAR (medido en IoU puro, la coherencia nunca
-       relaja esta puerta), no se fuerza: es preferible abrir un track nuevo
-       a intercambiar dos identidades en silencio (un ID switch no da ningun
-       error, solo datos mal atribuidos).
+       distingue. Si ningun candidato llega al umbral, no se fuerza: es
+       preferible abrir un track nuevo a intercambiar dos identidades en
+       silencio (un ID switch no da ningun error, solo datos mal atribuidos).
     3. Un track que no se empareja NO muere de inmediato: sigue "flotando"
        sobre su prediccion hasta MAX_AGE_S segundos sin ver nada. Esto es lo
        que le permite sobrevivir a una persona que YOLO dejo de ver un par de
-       frames (confianza inestable) sin creerla otra persona nueva.
+       frames (confianza inestable) sin creerla otra persona nueva. La
+       prediccion durante ese tiempo no sigue extrapolando la velocidad tal
+       cual: se AMORTIGUA (ver `predecir_bbox`), para que un track viejo
+       converja hacia su ultima posicion conocida en vez de alejarse cada
+       vez mas persiguiendo una velocidad que quiza se estimo con solo dos
+       frames, algo de ruido incluido.
 
 POR QUE MAX_AGE Y LA VELOCIDAD SE MIDEN EN SEGUNDOS Y NO EN FRAMES DEL ARCHIVO
 -------------------------------------------------------------------------
@@ -68,6 +73,21 @@ parecido no siempre se puede desambiguar: la geometria sola no alcanza. Eso
 produce ID switches de verdad. `contar_cruces_sospechosos` (mas abajo) cuenta
 los momentos en que la geometria se quedo sin margen para decidir -es la unica
 senal medible sin anotar video a mano-, pero es una cota, no una certeza.
+
+Un caso distinto, medido y documentado a proposito: una oclusion que ademas
+viene con un CAMBIO DE ESCALA grande (la persona reaparece mucho mas cerca o
+mas lejos de la camara que cuando se perdio) puede no recuperar su id aunque
+la posicion se prediga perfecto. Medido contra video_003.mp4: una persona
+ocluida 1.53s reaparecio con una caja 62% mas alta (de 256px a 416px), porque
+`predecir_bbox` nunca actualiza el ANCHO ni el ALTO, solo x,y. Con la caja de
+antes y la de despues de tamanos tan distintos, el techo teorico de IoU -aun
+con la posicion perfectamente centrada- fue 0.528, no 1.0. Subir mas el
+umbral de emparejamiento no arregla esto (bajarlo tampoco: solo cambia a
+quien mas se le acepta un emparejamiento dudoso). Lo unico que de verdad lo
+resolveria es comparar el CONTENIDO de las dos cajas -re-identificacion por
+apariencia-, y esa es justo la tecnica prohibida por la Ley 1581 y el
+contrato de privacidad del proyecto (ver docs/data-contract.md). Se documenta
+como limite conocido, no se persigue con mas parametros.
 
 CUENTA DE CRUCES SOSPECHOSOS (medicion de calidad, sin necesitar groundtruth)
 -------------------------------------------------------------------------
@@ -120,13 +140,36 @@ from gondola.jsonl import read_events, write_events
 IOU_MINIMO_PARA_EMPAREJAR = 0.3
 """Por debajo de este solape, dos cajas no se consideran la misma persona.
 Mas vale abrir un track nuevo que forzar un emparejamiento dudoso: un track de
-mas se ve y se puede filtrar despues, un ID switch no avisa a nadie."""
+mas se ve y se puede filtrar despues, un ID switch no avisa a nadie.
 
-MAX_AGE_S = 0.6
+Se probo (y se descarto) hacer que este umbral crezca con el tiempo que un
+track lleva perdido -mas exigente cuanto mas viejo-, exactamente para que
+subir MAX_AGE_S no fuera gratis. Con datos reales (video_003.mp4) esa version
+resulto MENOS estable que esta (el rango de tracks creados entre distintos
+MAX_AGE_S paso de 32-33 a 33-40, y de forma no monotona) y encima no
+alcanzaba a recuperar el caso concreto que la motivo. La razon: el umbral
+creciente y la ventana de espera compartian la misma referencia (MAX_AGE_S),
+asi que tocar un numero movia dos comportamientos a la vez de formas dificiles
+de predecir. Un sistema estable y explicable vale mas que uno afinado que ya
+no se puede defender con claridad. La proteccion contra que un track viejo le
+robe la caja a otra persona vive ahora solo en `predecir_bbox`
+(amortiguacion de la velocidad): una prediccion que converge a la ultima
+posicion conocida, en vez de seguir alejandose, ya es mucho menos probable
+que se cruce por casualidad con alguien mas."""
+
+MAX_AGE_S = 2.0
 """Segundos que un track puede pasar sin ninguna deteccion emparejada antes de
 darse por perdido. EN SEGUNDOS, no en frames ni en eventos: ver el docstring
 del modulo sobre por que (FRAME_STRIDE cambia cuantos eventos representan el
-mismo tiempo real)."""
+mismo tiempo real).
+
+Medido contra video_003.mp4 (real): una oclusion de 1.53s -alguien tapado por
+otra persona que camina enfrente- necesita al menos 1.7s de margen para
+recuperar su id; 2.0s le sobra un poco sin llegar a ser un valor arbitrario.
+Subirlo ya no es una apuesta ciega gracias a la amortiguacion de velocidad en
+`predecir_bbox` (ver mas abajo): un track viejo no sigue extrapolando a la
+velocidad -posiblemente ruidosa- con la que se le vio por ultima vez, sino
+que converge hacia esa ultima posicion."""
 
 NIVEL_IOU_PARA_DESEMPATE = 0.1
 """Ancho del escalon de IoU dentro del cual dos candidatos se consideran
@@ -197,21 +240,39 @@ def centro(bbox: BBox) -> tuple[float, float]:
 
 
 def predecir_bbox(track: Track, timestamp: float) -> BBox:
-    """Donde deberia estar la caja del track AHORA, si siguio a la misma velocidad.
+    """Donde deberia estar la caja del track AHORA, si siguio a la misma
+    velocidad -amortiguada por cuanto lleva perdido.
 
     Con velocidad (0, 0) -si el track solo tiene una deteccion todavia- la
     prediccion es simplemente su ultima caja: no se asume movimiento sin
     evidencia de al menos dos posiciones.
+
+    LA VELOCIDAD SE AMORTIGUA CON EL TIEMPO PERDIDO. Una velocidad estimada
+    con dos observaciones (posiblemente ruidosas) y extrapolada varios
+    segundos en linea recta es PEOR que no extrapolar nada -medido contra
+    video_003.mp4: un track ocluido durante 1.53s, con una velocidad de solo
+    -17.6 px/s estimada de dos frames cercanos, terminaba con una prediccion
+    27px mas lejos de la persona real (que apenas se habia movido) que si se
+    hubiera asumido quieta. La velocidad efectiva decae en linea recta hasta
+    0 segun el track se acerca a MAX_AGE_S sin verse, de forma que la
+    prediccion CONVERGE hacia su ultima posicion conocida en vez de seguir
+    alejandose indefinidamente. Tiene sentido fisico: si no vi a alguien hace
+    1.5 segundos, la mejor apuesta es "sigue cerca de donde estaba", no
+    "siguio caminando en linea recta a la velocidad que le medi con dos
+    frames".
 
     `x` e `y` se recortan en 0 porque `BBox` (contract.py) exige coordenadas
     no negativas: una prediccion hacia el borde de la imagen no debe romper
     la validacion.
     """
     dt = timestamp - track.timestamp
+    factor_amortiguacion = max(0.0, 1.0 - dt / MAX_AGE_S)
     vx, vy = track.velocity
+    vx_efectiva = vx * factor_amortiguacion
+    vy_efectiva = vy * factor_amortiguacion
     return BBox(
-        x=max(0.0, track.bbox.x + vx * dt),
-        y=max(0.0, track.bbox.y + vy * dt),
+        x=max(0.0, track.bbox.x + vx_efectiva * dt),
+        y=max(0.0, track.bbox.y + vy_efectiva * dt),
         width=track.bbox.width,
         height=track.bbox.height,
     )

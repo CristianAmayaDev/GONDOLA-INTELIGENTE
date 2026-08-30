@@ -75,10 +75,48 @@ def test_sin_velocidad_la_prediccion_no_mueve_la_caja():
 
 
 def test_con_velocidad_la_prediccion_extrapola():
+    """A dt=0.5s con MAX_AGE_S=2.0, la velocidad ya se amortiguo un 25%
+    (factor=1-0.5/2.0=0.75): 10 + (20*0.75)*0.5 = 17.5, no 20."""
     track = Track(bbox=BBox(x=10, y=10, width=50, height=100), timestamp=0.0,
                  velocity=(20.0, 0.0))
-    predicha = predecir_bbox(track, 0.5)  # medio segundo despues, a 20 px/s
-    assert predicha.x == pytest.approx(20.0)
+    predicha = predecir_bbox(track, 0.5)
+    assert predicha.x == pytest.approx(17.5)
+
+
+def test_la_prediccion_converge_a_la_ultima_posicion_con_el_tiempo():
+    """Cuanto mas viejo el track, menos se aleja la prediccion de su ultima
+    caja conocida -lo contrario de extrapolar sin limite. Justo al borde de
+    MAX_AGE_S, la velocidad esta completamente amortiguada: la prediccion es
+    la ultima posicion, tal cual."""
+    track = Track(bbox=BBox(x=100, y=100, width=40, height=100), timestamp=0.0,
+                 velocity=(50.0, 0.0))
+    cerca = predecir_bbox(track, 0.1)
+    lejos = predecir_bbox(track, MAX_AGE_S - 0.01)
+    al_borde = predecir_bbox(track, MAX_AGE_S)
+
+    assert cerca.x > 100.0            # recien perdido, casi sin amortiguar
+    assert al_borde.x == pytest.approx(100.0)   # se congela en la ultima posicion
+    assert 100.0 < lejos.x < cerca.x  # cuanto mas viejo, menos se aleja
+
+
+def test_amortiguacion_recupera_una_persona_casi_quieta_tras_una_oclusion_larga():
+    """Version compacta del caso real medido en video_003.mp4: alguien que
+    apenas se movia (velocidad chica, estimada con solo dos frames, con algo
+    de ruido) queda oculto 1.53s detras de otra persona que camina enfrente,
+    y reaparece casi en el mismo sitio. Sin amortiguar, la extrapolacion
+    lineal se habria alejado de donde en realidad seguia (ver docstring del
+    modulo); amortiguada, la recupera."""
+    eventos = [
+        crear_evento(0, 0.000, x=970, y=100),
+        crear_evento(1, 0.033, x=954, y=100),
+        crear_evento(2, 0.067, x=952, y=100),
+        # se pierde 1.53s -oculto detras de alguien que camina enfrente-
+        crear_evento(3, 1.600, x=949, y=100),
+    ]
+    resumen = Resumen()
+    ids = [e.track_id for e in asignar_track_ids(iter(eventos), resumen)]
+    assert ids == [1, 1, 1, 1]
+    assert resumen.tracks_creados == 1
 
 
 def test_la_prediccion_no_cae_en_coordenadas_negativas():
@@ -202,15 +240,25 @@ def test_dos_personas_con_velocidades_simetricas_el_iou_solo_empata():
     """El mismo cruce del test anterior, pero con la logica ACTUAL (coherencia
     incluida): las predicciones de A y B coinciden EXACTO -el empate de IoU es
     real, no redondeo-, y aun asi el resultado ya NO depende del orden: la
-    direccion distingue lo que el IoU no puede."""
-    track_a = Track(bbox=BBox(x=34, y=16, width=40, height=40), timestamp=0.04,
-                    velocity=(400.0, 100.0))
-    track_b = Track(bbox=BBox(x=66, y=24, width=40, height=40), timestamp=0.04,
-                    velocity=(-400.0, -100.0))
+    direccion distingue lo que el IoU no puede.
+
+    Los bbox de partida se calculan hacia atras desde el punto de cruce
+    (70, 40) usando el desplazamiento YA amortiguado (velocidad * dt * factor),
+    no el crudo: con la velocidad amortiguandose con el tiempo, ese es el
+    desplazamiento que `predecir_bbox` de verdad aplica."""
+    dt = 0.04
+    factor = max(0.0, 1.0 - dt / MAX_AGE_S)
+    vx, vy = 400.0, 100.0
+    track_a = Track(bbox=BBox(x=70 - vx * dt * factor - 20, y=40 - vy * dt * factor - 20,
+                              width=40, height=40),
+                    timestamp=0.04, velocity=(vx, vy))
+    track_b = Track(bbox=BBox(x=70 + vx * dt * factor - 20, y=40 + vy * dt * factor - 20,
+                              width=40, height=40),
+                    timestamp=0.04, velocity=(-vx, -vy))
 
     pred_a = predecir_bbox(track_a, 0.08)
     pred_b = predecir_bbox(track_b, 0.08)
-    assert pred_a == pred_b  # el empate de verdad: las dos predicciones son la MISMA caja
+    assert centro(pred_a) == pytest.approx(centro(pred_b))  # el empate de verdad
 
     det_a_real = crear_evento(2, 0.08, x=54, y=21, w=40, h=40)  # continua el rumbo de A
     det_b_real = crear_evento(2, 0.08, x=46, y=19, w=40, h=40)  # continua el rumbo de B
