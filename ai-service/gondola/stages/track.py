@@ -46,21 +46,55 @@ SIN APARIENCIA, A PROPOSITO
 ----------------------------
 `track_id` sale unicamente de esta geometria: posicion, velocidad y solape.
 Nunca se deriva del contenido de la caja (color, textura, forma de la
-silueta). De hecho esta etapa ni siquiera RECIBE pixeles: lee un .jsonl con
-cajas y numeros, no el video. Eso no es una promesa de buen comportamiento,
-es que la reidentificacion por apariencia es estructuralmente imposible con
-esta entrada.
+silueta). De hecho esta etapa ni siquiera RECIBE pixeles para decidir el
+seguimiento: lee un .jsonl con cajas y numeros. Eso no es una promesa de buen
+comportamiento, es que la reidentificacion por apariencia es estructuralmente
+imposible con esa entrada. El video solo se reabre, opcionalmente, para
+DIBUJAR el resultado (ver mas abajo); nunca para decidir un track_id.
 
-POR QUE NO HAY IMPORTS PESADOS AQUI
-------------------------------------
-A diferencia de `detect.py` (que necesita ultralytics y OpenCV), esta etapa es
-aritmetica pura sobre numeros que ya estan en el .jsonl: no hace falta ninguna
-libreria nueva, ni siquiera numpy. Por eso no hay ninguna seccion de imports
-diferidos: todo lo que se usa aqui ya esta en requirements-dev.txt.
+QUE NO RESUELVE (honesto, no una promesa)
+-------------------------------------------
+Sin apariencia, una oclusion CASI TOTAL entre dos personas que se mueven
+parecido no siempre se puede desambiguar: la geometria sola no alcanza. Eso
+produce ID switches de verdad. `contar_cruces_sospechosos` (mas abajo) cuenta
+los momentos en que la geometria se quedo sin margen para decidir -es la unica
+senal medible sin anotar video a mano-, pero es una cota, no una certeza.
+
+CUENTA DE CRUCES SOSPECHOSOS (medicion de calidad, sin necesitar groundtruth)
+-------------------------------------------------------------------------
+No hay anotaciones humanas todavia (eso es evaluacion contra `groundtruth`,
+Fase futura y de todo el equipo). Mientras tanto, esta etapa se autodiagnostica:
+en cada frame, si el emparejamiento elegido para dos tracks tambien habria sido
+valido AL REVES (intercambiando a quien le toca cada caja), no hay forma de
+saber cual de las dos versiones era la correcta. Eso se cuenta como un cruce
+sospechoso. Es una cota superior de los ID switches reales, no un conteo
+certificado: subestima si tres o mas personas se enredan a la vez, y no puede
+saber si el cruce de verdad ocurrio o si la geometria solo se puso ambigua sin
+que hubiera swap. Sirve para lo que pide el equipo: un numero que empeora o
+mejora cuando alguien toca el algoritmo.
+
+EL VIDEO PROPIO (--render), REUTILIZANDO gondola/video/
+-------------------------------------------------------
+`detect` ya sabe dibujar cajas en modo privacy/debug (`gondola/video/render.py`).
+Esta etapa reutiliza exactamente ese `Renderer`, pasandole un color y una
+etiqueta ("id N") por evento en vez de las de `detect` (verde, confianza). El
+color sale de `color_desde_id`: una funcion determinista del numero, nunca
+una tabla guardada ni nada derivado de la persona. Si el video de origen no
+existe, no se falla: el .jsonl se escribe igual y se avisa que no se pudo
+renderizar.
+
+POR QUE LOS IMPORTS DE VIDEO ESTAN DENTRO DE LAS FUNCIONES
+------------------------------------------------------------
+A diferencia del resto de este modulo (aritmetica pura, cero dependencias
+nuevas), reabrir el video para dibujar SI necesita OpenCV, que no esta en
+requirements-dev.txt. Por eso, igual que en `detect.py`, esos imports viven
+dentro de las funciones que los usan: los 7 companeros siguen corriendo
+`pytest` sin instalarlo.
 """
 
 from __future__ import annotations
 
+import colorsys
 import json
 import time
 from dataclasses import dataclass
@@ -110,6 +144,7 @@ class Resumen:
     tracks_creados: int = 0
     emparejamientos: int = 0
     tracks_activos_al_cierre: int = 0
+    id_switches_sospechosos: int = 0
 
 
 # --------------------------------------------------------------------------
@@ -210,19 +245,65 @@ def emparejar(
     return emparejados, sin_emparejar
 
 
-def asignar_track_ids(eventos: Iterator[Event], resumen: Resumen) -> Iterator[Event]:
-    """Recorre los eventos en orden y les va asignando track_id, de a un frame.
+def contar_cruces_sospechosos(
+    tracks: dict[int, Track], emparejados: dict[int, Event], timestamp: float
+) -> int:
+    """Cuenta pares de tracks cuyo emparejamiento en ESTE frame se pudo haber
+    intercambiado sin violar el umbral de IoU.
 
-    Es un generador: solo mantiene en memoria los tracks activos y las
-    detecciones del frame que esta procesando, nunca el archivo completo. Los
-    eventos llegan agrupados por frame porque `detect` los escribio asi (todas
-    las detecciones de un frame seguidas); agruparlos aqui no exige ordenarlos
-    de nuevo.
+    Se llama ANTES de actualizar los tracks (con su posicion previa a este
+    frame): para cada par de tracks emparejados (ta -> ea, tb -> eb), si
+    tambien habria sido valido asignar ta -> eb y tb -> ea (las dos con IoU
+    por encima de IOU_MINIMO_PARA_EMPAREJAR), la geometria por si sola no
+    alcanzaba para distinguirlos. Eso es exactamente la situacion que produce
+    un ID switch real: dos identidades que se pudieron haber cruzado entre
+    este frame y el anterior.
+
+    Es una senal SOSPECHOSA, no una certeza: sin apariencia ni groundtruth no
+    se puede confirmar que el intercambio de verdad ocurrio, solo que la
+    geometria no lo descarta. Ver el docstring del modulo.
+    """
+    ids = list(emparejados.keys())
+    sospechosos = 0
+    for i in range(len(ids)):
+        for j in range(i + 1, len(ids)):
+            id_a, id_b = ids[i], ids[j]
+            pred_a = predecir_bbox(tracks[id_a], timestamp)
+            pred_b = predecir_bbox(tracks[id_b], timestamp)
+            cruzado_a_con_b = iou(pred_a, emparejados[id_b].detection.bbox)
+            cruzado_b_con_a = iou(pred_b, emparejados[id_a].detection.bbox)
+            if (cruzado_a_con_b >= IOU_MINIMO_PARA_EMPAREJAR
+                    and cruzado_b_con_a >= IOU_MINIMO_PARA_EMPAREJAR):
+                sospechosos += 1
+    return sospechosos
+
+
+def color_desde_id(track_id: int) -> tuple[int, int, int]:
+    """Color BGR estable y distinto por track_id, para pintarlo en el video.
+
+    Es una funcion matematica determinista del numero (angulo dorado sobre el
+    circulo de tono, para que colores consecutivos se vean bien distintos): no
+    se guarda ninguna tabla ni se deriva de nada de la persona. El mismo
+    track_id siempre da el mismo color, en cualquier frame del video.
+    """
+    tono = (track_id * 0.618033988749895) % 1.0  # razon aurea: tonos bien repartidos
+    r, g, b = colorsys.hsv_to_rgb(tono, 0.65, 0.95)
+    return (int(b * 255), int(g * 255), int(r * 255))  # BGR: el orden de OpenCV
+
+
+def _asignar_por_frame(
+    eventos: Iterator[Event], resumen: Resumen
+) -> Iterator[tuple[int, list[Event]]]:
+    """El nucleo del seguimiento: agrupa por frame y va asignando track_id.
+
+    Entrega (numero_de_frame, eventos_de_ese_frame_con_track_id) en orden, en
+    vez de eventos sueltos, para que quien dibuje el video (`_procesar`) pueda
+    emparejar cada grupo con su frame real sin volver a agrupar nada.
     """
     tracks: dict[int, Track] = {}
     siguiente_id = 1
 
-    for _frame, grupo_iter in groupby(eventos, key=lambda e: e.frame):
+    for frame, grupo_iter in groupby(eventos, key=lambda e: e.frame):
         grupo = list(grupo_iter)
         timestamp = grupo[0].timestamp
 
@@ -234,6 +315,9 @@ def asignar_track_ids(eventos: Iterator[Event], resumen: Resumen) -> Iterator[Ev
             del tracks[tid]
 
         emparejados, sin_emparejar = emparejar(tracks, grupo)
+        resumen.id_switches_sospechosos += contar_cruces_sospechosos(
+            tracks, emparejados, timestamp
+        )
 
         for track_id, evento in emparejados.items():
             actualizar_track(tracks[track_id], evento)
@@ -251,6 +335,16 @@ def asignar_track_ids(eventos: Iterator[Event], resumen: Resumen) -> Iterator[Ev
         if resumen.eventos_procesados % EVENTOS_ENTRE_AVISOS < len(grupo):
             _avisar_progreso(resumen)
 
+        yield frame, grupo
+
+
+def asignar_track_ids(eventos: Iterator[Event], resumen: Resumen) -> Iterator[Event]:
+    """Recorre los eventos en orden y les va asignando track_id, de a un frame.
+
+    Es un generador: solo mantiene en memoria los tracks activos y las
+    detecciones del frame que esta procesando, nunca el archivo completo.
+    """
+    for _frame, grupo in _asignar_por_frame(eventos, resumen):
         yield from grupo
 
 
@@ -260,6 +354,79 @@ def _avisar_progreso(resumen: Resumen) -> None:
         f"tracks_creados {resumen.tracks_creados:>5}   "
         f"emparejamientos {resumen.emparejamientos:>7}"
     )
+
+
+# --------------------------------------------------------------------------
+# Render: reutiliza gondola/video/, no reimplementa nada de OpenCV aqui
+# --------------------------------------------------------------------------
+
+def _fusionar_con_video(grupos, frames_de_video):
+    """Empareja los grupos (frame, eventos) con los frames reales del video.
+
+    Un frame de video sin ninguna deteccion se entrega con lista vacia -igual
+    que hace `detect`-, para que el video de salida tenga tantos frames como
+    el original. Si el video se acaba antes que los datos (por ejemplo,
+    porque se reconfiguro MAX_FRAMES entre una corrida y otra), lo que sobra
+    se entrega igual, con `imagen=None`, para que NUNCA se pierda un evento
+    del .jsonl por culpa del render: dibujar es secundario, escribir el
+    contrato no.
+    """
+    grupos_iter = iter(grupos)
+    frame_actual, grupo_actual = next(grupos_iter, (None, None))
+    for indice, timestamp, imagen in frames_de_video:
+        if frame_actual == indice:
+            eventos = grupo_actual
+            frame_actual, grupo_actual = next(grupos_iter, (None, None))
+        else:
+            eventos = []
+        yield indice, timestamp, imagen, eventos
+
+    while frame_actual is not None:
+        yield frame_actual, None, None, grupo_actual
+        frame_actual, grupo_actual = next(grupos_iter, (None, None))
+
+
+def _procesar(cfg: Config, entrada: Path, resumen: Resumen) -> Iterator[Event]:
+    """Asigna track_id y, si hay video disponible, dibuja el resultado.
+
+    Reutiliza `gondola.video.render.Renderer` (el mismo que usa `detect`, en
+    los mismos modos privacy/debug), pasandole el color y la etiqueta por
+    track_id en vez de las de confianza. Sin video, o con RENDER_MODE=none,
+    el .jsonl se escribe exactamente igual: el render es un extra, nunca un
+    requisito.
+    """
+    grupos = _asignar_por_frame(read_events(entrada), resumen)
+
+    if cfg.render_mode == "none":
+        for _frame, grupo in grupos:
+            yield from grupo
+        return
+
+    if not cfg.video_path.exists():
+        print(f"[track] Aviso: no encuentro el video en {cfg.video_path}; "
+              f"no se puede renderizar. El .jsonl se escribe igual.")
+        for _frame, grupo in grupos:
+            yield from grupo
+        return
+
+    from gondola.video.reader import VideoReader
+    from gondola.video.render import Renderer
+
+    video_salida = pipeline.render_path("track", cfg, cfg.render_mode)
+    with VideoReader(cfg.video_path) as video, Renderer(
+        video_salida, cfg.render_mode, video.info.width, video.info.height, video.info.fps
+    ) as renderer:
+        print(f"[track] Render: {cfg.render_mode}  ->  {video_salida.name}")
+        for indice, timestamp, imagen, grupo in _fusionar_con_video(
+            grupos, video.frames(cfg.frame_stride, cfg.max_frames)
+        ):
+            if imagen is not None:
+                renderer.write(
+                    imagen, grupo, indice, timestamp,
+                    color_de=lambda e: color_desde_id(e.track_id),
+                    etiqueta_de=lambda e: f"id {e.track_id}",
+                )
+            yield from grupo
 
 
 # --------------------------------------------------------------------------
@@ -277,10 +444,7 @@ def run(cfg: Config) -> int:
 
     resumen = Resumen()
     inicio = time.perf_counter()
-    escritos = write_events(
-        rutas.output_path,
-        asignar_track_ids(read_events(rutas.input_path), resumen),
-    )
+    escritos = write_events(rutas.output_path, _procesar(cfg, rutas.input_path, resumen))
     transcurrido = time.perf_counter() - inicio
 
     ruta_resumen = pipeline.summary_path("track", cfg)
@@ -290,12 +454,34 @@ def run(cfg: Config) -> int:
     return 0
 
 
+def _leer_info_de_video_desde_detect(cfg: Config) -> dict:
+    """Lee width/height/fps del resumen de `detect`, para que `verify` tambien
+    pueda comprobar "bbox cabe dentro del frame" y "timestamp coincide con
+    frame/fps" sobre la salida de esta etapa (si no los propagamos, verify
+    omite esas dos reglas para track.jsonl aunque las tenga para detect.jsonl).
+
+    Si el resumen anterior no existe, esta corrupto o no trae esos campos, no
+    se falla: track no depende de que detect se haya corrido con render
+    activado ni de nada mas alla de su propia entrada; solo aprovecha el dato
+    si esta.
+    """
+    ruta = pipeline.summary_path("detect", cfg)
+    if not ruta.exists():
+        return {}
+    try:
+        datos = json.loads(ruta.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return datos.get("video", {})
+
+
 def _escribir_resumen(destino: Path, cfg: Config, resumen: Resumen, transcurrido: float) -> None:
     """Guarda las metricas de la corrida. Sin esto no se puede comparar nada."""
     datos = {
         "contract_version": CONTRACT_VERSION,
         "stage": "track",
         "video_id": cfg.video_id,
+        "video": _leer_info_de_video_desde_detect(cfg),
         "params": {
             "iou_minimo_para_emparejar": IOU_MINIMO_PARA_EMPAREJAR,
             "max_age_s": MAX_AGE_S,
@@ -305,6 +491,7 @@ def _escribir_resumen(destino: Path, cfg: Config, resumen: Resumen, transcurrido
             "tracks_creados": resumen.tracks_creados,
             "emparejamientos": resumen.emparejamientos,
             "tracks_activos_al_cierre": resumen.tracks_activos_al_cierre,
+            "id_switches_sospechosos": resumen.id_switches_sospechosos,
         },
         "performance": {
             "segundos": round(transcurrido, 2),
@@ -327,6 +514,8 @@ def _imprimir_resultado(
     print(f"  Emparejamientos        {resumen.emparejamientos}")
     print(f"  Tracks activos al cierre  {resumen.tracks_activos_al_cierre}  "
           f"(quedaron 'vivos' al terminar el video)")
+    print(f"  ID switches sospechosos   {resumen.id_switches_sospechosos}  "
+          f"(cota superior sin groundtruth; ver docstring del modulo)")
     print(f"  Tiempo                 {transcurrido:.2f} s")
     print("-" * 66)
     print(f"  Eventos   {jsonl}  ({escritos} lineas)")

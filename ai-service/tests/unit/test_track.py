@@ -22,6 +22,8 @@ from gondola.stages.track import (
     actualizar_track,
     asignar_track_ids,
     centro,
+    color_desde_id,
+    contar_cruces_sospechosos,
     emparejar,
     iou,
     predecir_bbox,
@@ -213,6 +215,104 @@ def test_dos_personas_lejanas_nunca_comparten_id():
     assert ids[0] != ids[1]
 
 
+def test_el_formato_del_track_id_es_el_acordado():
+    """Entero positivo, empieza en 1: lo que exige el contrato (contract.py)."""
+    eventos = [crear_evento(0, 0.0, x=0, y=0), crear_evento(1, 0.04, x=1000, y=1000)]
+    salida = list(asignar_track_ids(iter(eventos), Resumen()))
+    for e in salida:
+        assert isinstance(e.track_id, int)
+        assert e.track_id >= 1
+    assert salida[0].track_id == 1
+
+
+def test_quien_reaparece_no_hereda_el_id_de_otra_persona():
+    """A desaparece dos frames (dentro de MAX_AGE_S) mientras B sigue presente
+    todo el tiempo; al volver, A debe recuperar SU id, nunca el de B, y B no
+    debe cambiar de id en ningun momento."""
+    eventos = [
+        crear_evento(0, 0.00, x=0, y=0),      # A
+        crear_evento(0, 0.00, x=500, y=0),    # B
+        crear_evento(1, 0.04, x=500, y=0),    # solo B: A "desaparecio"
+        crear_evento(2, 0.08, x=500, y=0),    # solo B otra vez
+        crear_evento(3, 0.12, x=5, y=0),      # A reaparece cerca de donde estaba
+        crear_evento(3, 0.12, x=500, y=0),    # B sigue
+    ]
+    resumen = Resumen()
+    salida = list(asignar_track_ids(iter(eventos), resumen))
+
+    id_a = salida[0].track_id
+    id_b = salida[1].track_id
+    assert id_a != id_b
+
+    frame3 = {round(e.detection.bbox.x): e.track_id for e in salida if e.frame == 3}
+    assert frame3[5] == id_a     # A recupero SU id, no uno nuevo ni el de B
+    assert frame3[500] == id_b   # B nunca cambio de id
+    assert resumen.tracks_creados == 2  # nadie de mas
+
+
+def test_dos_detecciones_muy_solapadas_en_el_mismo_frame_reciben_ids_distintos():
+    """DEBE pasar: aunque casi no se puedan distinguir, dos detecciones del
+    MISMO frame nunca terminan con el mismo track_id. Fusionarlas en una sola
+    persona seria peor que un ID switch: se perderia gente de las metricas."""
+    e1 = crear_evento(0, 0.0, x=10, y=10)
+    e2 = crear_evento(0, 0.0, x=12, y=10)  # solape casi total
+    resumen = Resumen()
+    salida = list(asignar_track_ids(iter([e1, e2]), resumen))
+    assert salida[0].track_id != salida[1].track_id
+    assert resumen.tracks_creados == 2
+
+
+def test_bajo_oclusion_fuerte_no_se_fusionan_ni_aparece_un_tercer_id():
+    """DEBE pasar: bajo oclusion casi total puede que se cruce la identidad
+    (eso es un cruce sospechoso, se cuenta aparte), pero las dos personas
+    JAMAS se convierten en una sola ni aparece una tercera de la nada."""
+    eventos = [
+        crear_evento(0, 0.00, x=0, y=0),
+        crear_evento(0, 0.00, x=10, y=0),
+        crear_evento(1, 0.04, x=5, y=0),
+        crear_evento(1, 0.04, x=15, y=0),   # solape casi total con la anterior
+    ]
+    resumen = Resumen()
+    salida = list(asignar_track_ids(iter(eventos), resumen))
+
+    ids_iniciales = {salida[0].track_id, salida[1].track_id}
+    ids_frame1 = [e.track_id for e in salida if e.frame == 1]
+    assert len(set(ids_frame1)) == 2         # dos personas, dos ids -- nunca una
+    assert set(ids_frame1) == ids_iniciales  # los MISMOS dos ids de siempre
+    assert resumen.tracks_creados == 2
+    assert resumen.id_switches_sospechosos >= 1  # la oclusion se detecto y se conto
+
+
+def test_contar_cruces_sospechosos_ve_el_swap_valido_en_ambos_sentidos():
+    """Prueba directa de la funcion, sin pasar por todo asignar_track_ids."""
+    tracks = {
+        1: Track(bbox=BBox(x=0, y=0, width=40, height=100), timestamp=0.0),
+        2: Track(bbox=BBox(x=10, y=0, width=40, height=100), timestamp=0.0),
+    }
+    emparejados = {
+        1: crear_evento(1, 0.04, x=5, y=0),
+        2: crear_evento(1, 0.04, x=15, y=0),
+    }
+    assert contar_cruces_sospechosos(tracks, emparejados, 0.04) >= 1
+
+
+def test_contar_cruces_sospechosos_no_ve_nada_cuando_estan_lejos():
+    tracks = {
+        1: Track(bbox=BBox(x=0, y=0, width=40, height=100), timestamp=0.0),
+        2: Track(bbox=BBox(x=1000, y=0, width=40, height=100), timestamp=0.0),
+    }
+    emparejados = {
+        1: crear_evento(1, 0.04, x=5, y=0),
+        2: crear_evento(1, 0.04, x=1005, y=0),
+    }
+    assert contar_cruces_sospechosos(tracks, emparejados, 0.04) == 0
+
+
+def test_color_desde_id_es_estable_y_distingue_ids_distintos():
+    assert color_desde_id(7) == color_desde_id(7)   # estable: mismo id, mismo color
+    assert color_desde_id(1) != color_desde_id(2)   # ids consecutivos, colores distintos
+
+
 def test_track_no_toca_los_campos_de_otras_personas():
     """Lo mas importante de esta etapa: solo escribe track_id."""
     e = crear_evento(0, 0.0, x=10, y=10)
@@ -291,3 +391,97 @@ def test_run_sin_su_entrada_dice_que_corras_detect_antes(tmp_path):
     with pytest.raises(MissingInputError) as error:
         run(cfg)
     assert "python -m gondola detect" in str(error.value)
+
+
+# --------------------------------------------------------------------------
+# Propagacion de dimensiones/fps hacia el resumen, para que verify pueda
+# comprobar bbox_en_frame y timestamps tambien sobre la salida de track.
+# --------------------------------------------------------------------------
+
+def test_run_propaga_dimensiones_y_fps_del_resumen_de_detect(tmp_path):
+    cfg = load_config(env={"VIDEO_ID": "video_001", "OUTPUT_DIR": str(tmp_path / "output"),
+                           "RENDER_MODE": "none"})
+    rutas = pipeline.stage_paths("track", cfg)
+    write_events(rutas.input_path, [crear_evento(0, 0.0, x=0, y=0)])
+
+    ruta_resumen_detect = pipeline.summary_path("detect", cfg)
+    ruta_resumen_detect.write_text(
+        json.dumps({"video": {"width": 640, "height": 480, "fps": 25.0}}), encoding="utf-8"
+    )
+
+    assert run(cfg) == 0
+    resumen = json.loads(pipeline.summary_path("track", cfg).read_text(encoding="utf-8"))
+    assert resumen["video"] == {"width": 640, "height": 480, "fps": 25.0}
+
+
+def test_run_sin_resumen_de_detect_no_falla_y_deja_video_vacio(tmp_path):
+    """No haber corrido detect con render (o no tener su resumen) no es un
+    fallo: track simplemente no tiene ese dato para propagar."""
+    cfg = load_config(env={"VIDEO_ID": "video_001", "OUTPUT_DIR": str(tmp_path / "output"),
+                           "RENDER_MODE": "none"})
+    rutas = pipeline.stage_paths("track", cfg)
+    write_events(rutas.input_path, [crear_evento(0, 0.0, x=0, y=0)])
+
+    assert run(cfg) == 0
+    resumen = json.loads(pipeline.summary_path("track", cfg).read_text(encoding="utf-8"))
+    assert resumen["video"] == {}
+
+
+# --------------------------------------------------------------------------
+# El video propio de track (--render), reutilizando gondola/video/render.py
+# --------------------------------------------------------------------------
+
+def test_run_con_video_ausente_no_falla_y_avisa(tmp_path, capsys):
+    """Pedido explicito: si el video no existe, el .jsonl se escribe igual y
+    se avisa; nunca se rompe la corrida por no poder dibujar."""
+    cfg = load_config(env={
+        "VIDEO_ID": "video_001",
+        "OUTPUT_DIR": str(tmp_path / "output"),
+        "VIDEO_PATH": str(tmp_path / "videos" / "no_existe.mp4"),
+        "RENDER_MODE": "privacy",
+    })
+    rutas = pipeline.stage_paths("track", cfg)
+    write_events(rutas.input_path, [crear_evento(0, 0.0, x=0, y=0)])
+
+    assert run(cfg) == 0
+    salida = capsys.readouterr().out
+    assert "no encuentro el video" in salida.lower()
+    assert list(read_events(rutas.output_path))[0].track_id == 1
+
+
+def test_run_con_video_real_genera_un_video_anotado(tmp_path):
+    """Con un video real disponible, track debe producir su propio
+    video.track.<modo>.mp4, con un frame por cada frame del video original."""
+    pytest.importorskip("cv2")
+    import cv2
+    import numpy as np
+
+    video_path = tmp_path / "videos" / "clip.mp4"
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter.fourcc(*"mp4v"), 25.0, (100, 100))
+    for _ in range(3):
+        writer.write(np.zeros((100, 100, 3), dtype=np.uint8))
+    writer.release()
+
+    cfg = load_config(env={
+        "VIDEO_ID": "video_001",
+        "OUTPUT_DIR": str(tmp_path / "output"),
+        "VIDEO_PATH": str(video_path),
+        "RENDER_MODE": "privacy",
+    })
+    rutas = pipeline.stage_paths("track", cfg)
+    write_events(rutas.input_path, [
+        crear_evento(0, 0.00, x=10, y=10),
+        crear_evento(2, 0.08, x=15, y=10),  # el frame 1 no tiene a nadie
+    ])
+
+    assert run(cfg) == 0
+
+    video_salida = pipeline.render_path("track", cfg, "privacy")
+    assert video_salida.exists()
+    assert video_salida.stat().st_size > 0
+
+    # el .jsonl sigue completo: el render no se comio ningun evento
+    salida = list(read_events(rutas.output_path))
+    assert [e.frame for e in salida] == [0, 2]
+    assert all(e.track_id is not None for e in salida)
