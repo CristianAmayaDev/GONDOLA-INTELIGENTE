@@ -30,9 +30,10 @@ from gondola.errors import (
 from gondola.logging_setup import setup_logging
 from gondola.pipeline import STAGE_NAMES, STAGES, stage_paths
 
-# 'detect' ya esta implementada (Fase 3), asi que no imprime el texto de
-# placeholder. Los tests de placeholder van sobre las que siguen pendientes.
-ETAPAS_PENDIENTES = [e for e in STAGES if e.name != "detect"]
+# 'detect' (Fase 3) y 'track' (Fase 2 de la Persona 3) ya estan implementadas,
+# asi que no imprimen el texto de placeholder. Los tests de placeholder van
+# sobre las que siguen pendientes.
+ETAPAS_PENDIENTES = [e for e in STAGES if e.name not in ("detect", "track")]
 
 
 @pytest.fixture(autouse=True)
@@ -115,12 +116,13 @@ def test_el_placeholder_dice_de_quien_es_y_que_archivos_usa(etapa, capsys):
     assert etapa.output_suffix in salida  # que archivo debe producir
 
 
-def test_el_placeholder_de_track_dice_que_lee_lo_de_detect(capsys):
-    main(["track"])
-    salida = capsys.readouterr().out
-    assert "video_001.detect.jsonl" in salida
-    assert "video_001.track.jsonl" in salida
-    assert "detect" in salida
+def test_track_sin_su_entrada_dice_que_corras_detect_primero(capsys):
+    """track ya esta implementada: sin video_001.detect.jsonl debe fallar con
+    codigo 2 y un mensaje claro, nunca con un traceback."""
+    assert main(["track"]) == EXIT_FALTA_REQUISITO
+    salida = capsys.readouterr()
+    assert "python -m gondola detect" in salida.err
+    assert "Traceback" not in salida.err
 
 
 def test_un_subcomando_inventado_no_arranca():
