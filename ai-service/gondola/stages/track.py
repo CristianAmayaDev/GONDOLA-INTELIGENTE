@@ -433,8 +433,14 @@ def _procesar(cfg: Config, entrada: Path, resumen: Resumen) -> Iterator[Event]:
 # Punto de entrada de la etapa
 # --------------------------------------------------------------------------
 
-def run(cfg: Config) -> int:
-    """Ejecuta el seguimiento completo. Devuelve el codigo de salida."""
+def run(cfg: Config, abrir_video: bool = False) -> int:
+    """Ejecuta el seguimiento completo. Devuelve el codigo de salida.
+
+    `abrir_video` (igual que en `detect`): al terminar, abre el video anotado
+    con el reproductor por defecto del sistema. No hace nada si RENDER_MODE es
+    "none" o si el video no se pudo generar (por ejemplo, porque el video de
+    origen no existia).
+    """
     rutas = pipeline.stage_paths("track", cfg)
     pipeline.require_input("track", cfg)
 
@@ -449,7 +455,15 @@ def run(cfg: Config) -> int:
 
     ruta_resumen = pipeline.summary_path("track", cfg)
     _escribir_resumen(ruta_resumen, cfg, resumen, transcurrido)
-    _imprimir_resultado(resumen, escritos, transcurrido, rutas.output_path, ruta_resumen)
+
+    video_salida = pipeline.render_path("track", cfg, cfg.render_mode)
+    _imprimir_resultado(resumen, escritos, transcurrido, rutas.output_path, ruta_resumen,
+                       cfg, video_salida)
+
+    if abrir_video and cfg.render_mode != "none" and video_salida.exists():
+        from gondola.video.render import abrir_con_el_sistema
+
+        abrir_con_el_sistema(video_salida)
 
     return 0
 
@@ -505,7 +519,8 @@ def _escribir_resumen(destino: Path, cfg: Config, resumen: Resumen, transcurrido
 
 
 def _imprimir_resultado(
-    resumen: Resumen, escritos: int, transcurrido: float, jsonl: Path, ruta_resumen: Path
+    resumen: Resumen, escritos: int, transcurrido: float, jsonl: Path, ruta_resumen: Path,
+    cfg: Config, video_salida: Path,
 ) -> None:
     print()
     print("-" * 66)
@@ -520,5 +535,7 @@ def _imprimir_resultado(
     print("-" * 66)
     print(f"  Eventos   {jsonl}  ({escritos} lineas)")
     print(f"  Resumen   {ruta_resumen}")
+    if cfg.render_mode != "none" and video_salida.exists():
+        print(f"  Video     {video_salida}")
     print()
     print("  Siguiente etapa:  python -m gondola zones   (Persona 4)")

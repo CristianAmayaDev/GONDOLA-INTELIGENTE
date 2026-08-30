@@ -253,6 +253,17 @@ def test_las_opciones_ganan_al_env_para_esa_corrida():
     assert cfg != load_config()
 
 
+def test_track_acepta_render_y_open_igual_que_detect():
+    """Persona 4, 5 y 6 copian este modulo como plantilla: --render y --open
+    deben llamarse y comportarse igual en las dos etapas."""
+    cfg = config_con(["track", "--render", "debug"])
+    assert cfg.render_mode == "debug"
+
+    args = _parser().parse_args(["track", "--render", "none", "--open"])
+    assert args.render == "none"
+    assert args.open is True
+
+
 def test_max_frames_cero_por_opcion_significa_video_completo():
     """0 es un valor legitimo, no 'no me pasaron nada': tiene que llegar igual."""
     assert config_con(["detect", "--max-frames", "0"]).max_frames == 0
