@@ -8,7 +8,9 @@ Lee los eventos ya seguidos de la Persona 3 (`<video>.track.jsonl`, con
 cae en una, rellena `zone.zone_id` y `zone.segment`; si no cae en ninguna
 -estaba en el pasillo, entre gondolas-, `zone` se queda en null: es un
 resultado correcto, no un error, y sigue sirviendo para medir flujo. Ademas
-acumula `metrics.dwell_time`. Ningun otro campo se toca.
+acumula `metrics.dwell_time`. Ningun otro campo del contrato se toca; la
+clasificacion "se detiene"/"pasa de largo" (ver CASO 3 abajo) solo se cuenta
+para el resumen de la corrida, no se escribe en el evento.
 
 DE DONDE SALE EL ARCHIVO DE ZONAS
 ------------------------------------
@@ -73,11 +75,33 @@ todas las visitas que haya hecho. Fuera de cualquier zona (`zone.zone_id` es
 `null`) `dwell_time` tambien se deja en `null`: no hay "segundos en la zona"
 que contar si no hay zona.
 
-Deliberadamente NO se decide aqui si eso cuenta como "se detuvo" o "paso de
-largo" -esa clasificacion se calcula despues (etapa de metricas o dashboard)
-a partir de este `dwell_time` mas el desplazamiento neto del `support_point`,
-para poder recalibrar el umbral sin volver a correr esta etapa. Decidido en
-la Fase 1 de diseno, ver `docs/zones-format.md`.
+CASO 3 A DECIDIR: "SE DETIENE" vs "PASA DE LARGO"
+---------------------------------------------------
+El campo `dwell_time` es tiempo continuo, no una etiqueta. `clasifica_visita`
+convierte eso en la pregunta que de verdad le importa a un supermercado: si
+alguien PARO frente al estante o solo lo cruzo caminando. La regla es un solo
+umbral, `UMBRAL_SE_DETIENE_S` (2.0 segundos por defecto): `dwell_time >=
+umbral` es "se_detiene", por debajo es "pasa_de_largo", y `None` (fuera de
+zona) sigue siendo `None` -no hay clasificacion de algo que no esta en ningun
+estante.
+
+Por que 2.0 s: cruzar el ancho de un estante caminando a paso normal toma
+bien menos de un segundo; alguien que se queda 2 segundos o mas ya freno el
+paso a mirar algo, aunque no haya tomado ningun producto (eso lo decide la
+Persona 5 con `interaction`, es informacion aparte). Es un valor inicial
+razonable, no medido contra groundtruth -no hay groundtruth de esto todavia,
+ver `CLAUDE.md`-, por eso `clasifica_visita` recibe el umbral como parametro
+en vez de tenerlo fijo: quien tenga datos reales para recalibrarlo no
+necesita tocar esta funcion, solo pasar otro numero.
+
+OJO: esto clasifica el momento actual de la visita, no la visita completa.
+Un evento con `dwell_time=1.0` de alguien que dos frames despues llega a
+`dwell_time=3.0` sale como "pasa_de_largo" en ese instante y "se_detiene" mas
+tarde -es correcto: en el frame 1.0 esa persona, en efecto, todavia no se
+habia detenido. Reconstruir "se detuvo en algun momento de su visita" a
+partir de la secuencia completa es trabajo de la etapa de metricas o del
+dashboard (Persona 6), que ya tienen toda la visita en memoria; aqui solo se
+expone el clasificador puro para que lo reutilicen sin reinventarlo.
 
 UNA FRAGILIDAD YA CONOCIDA, HEREDADA DE `track` (no se resuelve aqui)
 -------------------------------------------------------------------
@@ -130,6 +154,26 @@ def asignar_zona(
     return candidatos[0]
 
 
+UMBRAL_SE_DETIENE_S = 2.0
+"""Segundos de `dwell_time` a partir de los cuales una visita cuenta como
+"se detiene" en vez de "pasa de largo". Ver "CASO 3" en el docstring del
+modulo para el porque de este valor y de por que no esta fijo en el codigo."""
+
+
+def clasifica_visita(
+    dwell_time: float | None, umbral_s: float = UMBRAL_SE_DETIENE_S
+) -> str | None:
+    """"se_detiene" si `dwell_time >= umbral_s`, "pasa_de_largo" si es menor,
+    o `None` si `dwell_time` es `None` (la persona no esta en ninguna zona).
+
+    Pura: no lee ni escribe ningun `Event`. Ver "CASO 3" en el docstring del
+    modulo.
+    """
+    if dwell_time is None:
+        return None
+    return "se_detiene" if dwell_time >= umbral_s else "pasa_de_largo"
+
+
 @dataclass
 class Visita:
     """La visita en curso de un `track_id`: a que zona, y desde cuando.
@@ -151,6 +195,8 @@ class Resumen:
     eventos_con_zona: int = 0
     eventos_sin_zona: int = 0
     eventos_por_zona: dict[str, int] = field(default_factory=dict)
+    eventos_se_detiene: int = 0
+    eventos_pasa_de_largo: int = 0
 
 
 def _procesar(entrada: Path, zonas: ZonesConfig, resumen: Resumen) -> Iterator[Event]:
@@ -187,6 +233,12 @@ def _procesar(entrada: Path, zonas: ZonesConfig, resumen: Resumen) -> Iterator[E
         evento.metrics.dwell_time = (
             evento.timestamp - visita.entrada if zona_actual is not None else None
         )
+
+        clasificacion = clasifica_visita(evento.metrics.dwell_time)
+        if clasificacion == "se_detiene":
+            resumen.eventos_se_detiene += 1
+        elif clasificacion == "pasa_de_largo":
+            resumen.eventos_pasa_de_largo += 1
 
         resumen.eventos_procesados += 1
         yield evento
@@ -262,6 +314,9 @@ def _escribir_resumen(
             "eventos_con_zona": resumen.eventos_con_zona,
             "eventos_sin_zona": resumen.eventos_sin_zona,
             "eventos_por_zona": resumen.eventos_por_zona,
+            "eventos_se_detiene": resumen.eventos_se_detiene,
+            "eventos_pasa_de_largo": resumen.eventos_pasa_de_largo,
+            "umbral_se_detiene_s": UMBRAL_SE_DETIENE_S,
         },
         "performance": {
             "segundos": round(transcurrido, 2),
@@ -284,6 +339,8 @@ def _imprimir_resultado(
     print(f"  Eventos sin zona       {resumen.eventos_sin_zona}  (pasillo, entre gondolas)")
     for clave, cuenta in sorted(resumen.eventos_por_zona.items()):
         print(f"      {clave:<30} {cuenta}")
+    print(f"  Se detiene (>= {UMBRAL_SE_DETIENE_S:.1f}s)   {resumen.eventos_se_detiene}")
+    print(f"  Pasa de largo          {resumen.eventos_pasa_de_largo}")
     print(f"  Tiempo                 {transcurrido:.2f} s")
     print("-" * 66)
     print(f"  Eventos   {jsonl}  ({escritos} lineas)")

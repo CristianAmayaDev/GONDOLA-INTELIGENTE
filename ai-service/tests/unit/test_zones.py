@@ -18,10 +18,12 @@ from gondola.errors import MissingInputError, ZonesConfigError
 from gondola.jsonl import read_events, write_events
 from gondola.stages import zones as zones_stage
 from gondola.stages.zones import (
+    UMBRAL_SE_DETIENE_S,
     Resumen,
     Visita,
     _procesar,
     asignar_zona,
+    clasifica_visita,
     punto_en_zona,
     run,
 )
@@ -142,6 +144,34 @@ def test_dos_zonas_solapadas_gana_la_mas_pequena():
 
 
 # --------------------------------------------------------------------------
+# clasifica_visita: "se_detiene" vs "pasa_de_largo" (CASO 3 del docstring)
+# --------------------------------------------------------------------------
+
+def test_dwell_time_bajo_el_umbral_clasifica_como_pasa_de_largo():
+    assert clasifica_visita(UMBRAL_SE_DETIENE_S - 0.1) == "pasa_de_largo"
+
+
+def test_dwell_time_justo_en_el_umbral_clasifica_como_se_detiene():
+    assert clasifica_visita(UMBRAL_SE_DETIENE_S) == "se_detiene"
+
+
+def test_dwell_time_sobre_el_umbral_clasifica_como_se_detiene():
+    assert clasifica_visita(UMBRAL_SE_DETIENE_S + 5.0) == "se_detiene"
+
+
+def test_dwell_time_none_clasifica_como_none():
+    """Fuera de cualquier zona no hay nada que clasificar."""
+    assert clasifica_visita(None) is None
+
+
+def test_clasifica_visita_acepta_un_umbral_propio():
+    """El umbral es un parametro, no una constante fija: se puede recalibrar
+    sin tocar la funcion (ver CASO 3 del docstring del modulo)."""
+    assert clasifica_visita(1.0, umbral_s=0.5) == "se_detiene"
+    assert clasifica_visita(1.0, umbral_s=1.5) == "pasa_de_largo"
+
+
+# --------------------------------------------------------------------------
 # _procesar: asignacion de zone + acumulacion de dwell_time
 # --------------------------------------------------------------------------
 
@@ -178,6 +208,11 @@ def _procesar_en_memoria(eventos, zonas, resumen):
         evento.metrics.dwell_time = (
             evento.timestamp - visita.entrada if zona_actual is not None else None
         )
+        clasificacion = clasifica_visita(evento.metrics.dwell_time)
+        if clasificacion == "se_detiene":
+            resumen.eventos_se_detiene += 1
+        elif clasificacion == "pasa_de_largo":
+            resumen.eventos_pasa_de_largo += 1
         resumen.eventos_procesados += 1
         yield evento
 
@@ -190,6 +225,20 @@ def test_el_primer_evento_de_una_visita_tiene_dwell_time_cero():
     resultado, _resumen = eventos_por_track(zonas, eventos)
     assert resultado[0].zone.segment == "estante_1"
     assert resultado[0].metrics.dwell_time == pytest.approx(0.0)
+
+
+def test_un_punto_claramente_fuera_de_todas_deja_zone_id_en_null():
+    """No solo `asignar_zona`: el `Event` completo que sale de `_procesar`
+    tambien debe quedar con `zone.zone_id` en null cuando nadie esta cerca
+    de ningun estante (support_point en (250, 250), fuera de las dos zonas
+    de `zonas_de_ejemplo`, que ocupan x en [0, 200) e y en [0, 200))."""
+    zonas = zonas_de_ejemplo()
+    eventos = [crear_evento(frame=0, timestamp=10.0, x=230, y=200)]
+    resultado, resumen = eventos_por_track(zonas, eventos)
+    assert resultado[0].zone.zone_id is None
+    assert resultado[0].zone.segment is None
+    assert resumen.eventos_sin_zona == 1
+    assert resumen.eventos_con_zona == 0
 
 
 def test_un_punto_justo_en_el_borde_inferior_de_la_zona_no_cuenta_como_dentro():
@@ -281,6 +330,25 @@ def test_dos_tracks_distintos_no_comparten_visita():
     assert resultado[0].metrics.dwell_time == pytest.approx(0.0)  # track 1, primera vez
     assert resultado[1].metrics.dwell_time == pytest.approx(0.0)  # track 2, primera vez
     assert resultado[2].metrics.dwell_time == pytest.approx(2.0)  # track 1, segunda vez
+
+
+def test_quien_solo_pasa_no_supera_el_umbral_de_se_detiene():
+    """Alguien que cruza el estante caminando (dwell_time siempre bien por
+    debajo de UMBRAL_SE_DETIENE_S) nunca deberia clasificar como
+    'se_detiene' en ningun evento de su paso, y el resumen no debe contarlo
+    ahi tampoco."""
+    zonas = zonas_de_ejemplo()
+    eventos = [
+        crear_evento(frame=0, timestamp=10.00, x=20, y=50, track_id=7),  # entra a estante_1
+        crear_evento(frame=1, timestamp=10.30, x=25, y=50, track_id=7),  # dwell=0.3
+        crear_evento(frame=2, timestamp=10.60, x=30, y=50, track_id=7),  # dwell=0.6
+        crear_evento(frame=3, timestamp=10.90, x=35, y=50, track_id=7),  # dwell=0.9, sale
+    ]
+    resultado, resumen = eventos_por_track(zonas, eventos)
+    assert all(e.metrics.dwell_time < UMBRAL_SE_DETIENE_S for e in resultado)
+    assert all(clasifica_visita(e.metrics.dwell_time) == "pasa_de_largo" for e in resultado)
+    assert resumen.eventos_pasa_de_largo == 4
+    assert resumen.eventos_se_detiene == 0
 
 
 def test_procesar_no_toca_detection_ni_track_id():
