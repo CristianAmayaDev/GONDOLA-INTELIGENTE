@@ -82,9 +82,17 @@ function renderVideoColumn(slot) {
   const placeholderId = `video-compare-${slot.toLowerCase()}-placeholder`;
   const idPrefix = slot.toLowerCase();
 
+  // Mismo motivo que en renderVideoPlayer() (vista-panel.js): el hueco usa
+  // la proporcion real del video (current.width/height) en vez de una
+  // altura fija, para que el <video> no deje franjas negras a los lados.
+  // SIN max-height: combinado con width:100%, en pantallas anchas y bajas
+  // el navegador recortaba la altura pero dejaba el ancho al 100%,
+  // rompiendo la proporcion y trayendo de vuelta las franjas negras
+  // (bug real, visto con captura -ver el commit que quito esto).
+  const aspectoCompare = current && current.width && current.height ? `${current.width} / ${current.height}` : '16 / 9';
   const videoCard = demo
     ? `<div class="bg-white rounded-xl border border-[#EAEAEA] p-5 flex items-center justify-center text-center text-xs text-[#787774]" style="min-height:220px">Video de prueba: sin grabación real que mostrar</div>`
-    : `<div class="bg-white rounded-xl border border-[#EAEAEA] p-3 shadow-xs"><div id="${placeholderId}" class="w-full rounded-lg bg-[#0B1220]" style="height:220px"></div></div>`;
+    : `<div class="bg-white rounded-xl border border-[#EAEAEA] p-3 shadow-xs"><div id="${placeholderId}" class="w-full rounded-lg bg-[#0B1220]" style="aspect-ratio:${aspectoCompare}"></div></div>`;
 
   return `
   <div class="space-y-4">
