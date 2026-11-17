@@ -1,0 +1,36 @@
+{
+  "video_id": "subido_whatsapp_video_2026_11_12_at_10_02_05_am_100256",
+  "frame_width": 920,
+  "frame_height": 680,
+  "gondolas": [
+    {
+      "zone_id": "gondola_A",
+      "name": "gondola 1",
+      "product_category": null,
+      "shelves": [
+        {
+          "segment": "estante_1",
+          "name": "Estante 1",
+          "product_category": null,
+          "floor_zone": {
+            "x": 376,
+            "y": 489,
+            "width": 80,
+            "height": 30
+          }
+        },
+        {
+          "segment": "estante_2",
+          "name": "Estante 2",
+          "product_category": null,
+          "floor_zone": {
+            "x": 151,
+            "y": 41,
+            "width": 739,
+            "height": 289
+          }
+        }
+      ]
+    }
+  ]
+}
